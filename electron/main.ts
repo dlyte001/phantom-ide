@@ -16,6 +16,37 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
   : RENDERER_DIST
 
 let win: BrowserWindow | null
+const OLLAMA_URL = 'http://127.0.0.1:11434'
+const MODEL_NAME = 'qwen2.5-coder:1.5b'
+
+ipcMain.handle('ghost:health', async () => {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 3000)
+
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/tags`, {
+      signal: controller.signal,
+    })
+
+    if (!response.ok) return { status: 'offline' as const }
+
+    const data = await response.json() as {
+      models?: Array<{ name?: unknown; model?: unknown }>
+    }
+    const modelAvailable = Array.isArray(data.models) && data.models.some((model) =>
+      [model.name, model.model].some((name) =>
+        typeof name === 'string' &&
+        (name === MODEL_NAME || name.startsWith(`${MODEL_NAME}:`)),
+      ),
+    )
+
+    return { status: modelAvailable ? 'connected' as const : 'model-not-found' as const }
+  } catch {
+    return { status: 'offline' as const }
+  } finally {
+    clearTimeout(timeout)
+  }
+})
 
 // Keep AI requests inside Electron's main process.
 ipcMain.handle(
@@ -37,11 +68,16 @@ ipcMain.handle(
       throw new Error('Enter a question for the Ghost first.')
     }
 
-    const response = await fetch('http://127.0.0.1:11434/api/chat', {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 120000)
+    let response: Response
+    try {
+      response = await fetch(`${OLLAMA_URL}/api/chat`, {
       method: 'POST',
+      signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'qwen2.5-coder:1.5b',
+        model: MODEL_NAME,
         stream: false,
         messages: [
           {
@@ -72,7 +108,15 @@ ipcMain.handle(
           temperature: 0.3,
         },
       }),
-    })
+      })
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error('The local model request timed out. Try again or check Ollama.')
+      }
+      throw new Error('Ollama is unreachable at 127.0.0.1:11434. Check that it is running.')
+    } finally {
+      clearTimeout(timeout)
+    }
 
     if (!response.ok) {
       throw new Error(

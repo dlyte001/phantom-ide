@@ -1,5 +1,5 @@
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
 import {
@@ -42,6 +42,40 @@ type BugReport = {
   findings: BugFinding[]
 }
 
+type ConnectionStatus = 'connecting' | 'connected' | 'offline' | 'model-not-found'
+
+function parseBugReport(answer: string, lineCount: number): BugReport {
+  const cleanedAnswer = answer.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+  const report: unknown = JSON.parse(cleanedAnswer)
+  if (!report || typeof report !== 'object') throw new Error('Expected a JSON object.')
+
+  const candidate = report as Record<string, unknown>
+  if (typeof candidate.summary !== 'string' || !Array.isArray(candidate.findings)) {
+    throw new Error('Expected a summary and findings array.')
+  }
+
+  const findings = candidate.findings.map((value): BugFinding => {
+    if (!value || typeof value !== 'object') throw new Error('A finding was not an object.')
+    const finding = value as Record<string, unknown>
+    if (
+      typeof finding.title !== 'string' || !finding.title.trim() ||
+      !['error', 'warning', 'info'].includes(String(finding.severity)) ||
+      !Number.isInteger(finding.line) || Number(finding.line) < 1 || Number(finding.line) > lineCount ||
+      typeof finding.explanation !== 'string' || typeof finding.fix !== 'string'
+    ) throw new Error('A finding contains missing or invalid fields.')
+
+    return {
+      title: finding.title.trim(),
+      severity: finding.severity as BugFinding['severity'],
+      line: finding.line as number,
+      explanation: finding.explanation,
+      fix: finding.fix,
+    }
+  })
+
+  return { summary: candidate.summary, findings }
+}
+
 const initialCode = `// Welcome to PHANTOM IDE
 // Your code. Your ghost. Your rules.
 
@@ -63,20 +97,39 @@ function App() {
   const [activeFile, setActiveFile] = useState('main.ts')
   const [activeTab, setActiveTab] = useState('ghost')
   const [message, setMessage] = useState('')
-  const [ghostReply, setGhostReply] = useState(
-    "You've arrived. Excellent. I was beginning to think this codebase had abandoned me. What shall we investigate?"
-  )
+  const [ghostReply, setGhostReply] = useState('The Ghost is quiet until summoned. Choose an action to analyze the current editor sample.')
   const [isPossessed, setIsPossessed] = useState(false)
   const [isThinking, setIsThinking] = useState(false)
   const [bottomPanel, setBottomPanel] = useState('problems')
   const [showExplorer, setShowExplorer] = useState(true)
-  
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting')
+  const [selectedFinding, setSelectedFinding] = useState<BugFinding | null>(null)
 
-  
-  async function summonGhost(action: string) {
+  useEffect(() => {
+    let mounted = true
+    const checkConnection = async () => {
+      try {
+        const result = await window.phantom.checkHealth()
+        if (mounted) setConnectionStatus(result.status)
+      } catch {
+        if (mounted) setConnectionStatus('offline')
+      }
+    }
+    void checkConnection()
+    const interval = window.setInterval(checkConnection, 15000)
+    return () => {
+      mounted = false
+      window.clearInterval(interval)
+    }
+  }, [])
+
+
+
+  async function summonGhost(action: 'explain' | 'bugs' | 'refactor' | 'test') {
     setIsThinking(true)
-        if (action === 'bugs') {
+    if (action === 'bugs') {
       setBugReport(null)
+      setSelectedFinding(null)
     }
     setIsPossessed(false)
     setActiveTab('ghost')
@@ -86,14 +139,9 @@ function App() {
       bugs: 'Investigate this code for bugs, runtime errors, and edge cases. ' +
         'For each finding, report the 1-based line number of the exact ' +
         'expression that causes or demonstrates the issue. Count lines ' +
-        'from the first line of the supplied code. For division by zero, ' +
-        'identify the line containing the call with a zero denominator ' +
-        'if that call is present. Suggest a practical fix.',      refactor: 'Review this code and suggest practical improvements to readability, reliability, and maintainability.',
+        'from the first line of the supplied code. Suggest a practical fix.',
+      refactor: 'Review this code and suggest practical improvements to readability, reliability, and maintainability.',
       test: 'Suggest useful test cases for this code, including edge cases. Provide example tests where appropriate.',
-      welcome:
-        mode === 'instant'
-          ? 'Briefly introduce yourself as the Ghost in PHANTOM IDE and offer to investigate the current code.'
-          : 'Briefly describe what you observe in the current code. Do not claim to monitor changes automatically.',
     }
 
     try {
@@ -115,41 +163,10 @@ function App() {
 
       if (action === 'bugs') {
         try {
-          const cleanedAnswer = answer
-            .trim()
-            .replace(/^```(?:json)?\s*/i, '')
-            .replace(/\s*```$/, '')
+          const report = parseBugReport(answer, Math.max(1, code.split('\n').length))
 
-          const report = JSON.parse(cleanedAnswer) as BugReport
-
-          if (!report || !Array.isArray(report.findings)) {
-            throw new Error('Invalid bug report format')
-          }
-
-          const lineCount = Math.max(1, code.split('\n').length)
-
-          const validatedReport: BugReport = {
-            ...report,
-            findings: report.findings.map((finding) => {
-              const divisionCallLine = code
-                .split('\n')
-                .findIndex((line) => /\bdivide\s*\(\s*[^,]+,\s*0\s*\)/.test(line))
-
-              const correctedLine =
-                /division by zero/i.test(finding.title) && divisionCallLine !== -1
-                  ? divisionCallLine + 1
-                  : finding.line
-
-              return {
-                ...finding,
-                line: Number.isInteger(correctedLine)
-                  ? Math.max(1, Math.min(correctedLine, lineCount))
-                  : 1,
-              }
-            }),
-          }
-
-          setBugReport(validatedReport)
+          setBugReport(report)
+          setSelectedFinding(null)
           setGhostReply(report.summary || 'Investigation complete.')
 
           if (report.findings.length > 0) {
@@ -157,9 +174,7 @@ function App() {
           }
         } catch {
           setBugReport(null)
-          setGhostReply(
-            `The Ghost returned a response that wasn't valid bug-report JSON:\n\n${answer}`
-          )
+          setGhostReply('The Ghost returned a malformed bug report. Try investigating again; findings must include valid fields and a line within the current editor code.')
         }
       } else {
         setGhostReply(answer)
@@ -180,7 +195,7 @@ function App() {
     }
   }
 
-  
+
   async function sendQuestion() {
     if (!message.trim() || isThinking) return
 
@@ -243,11 +258,18 @@ function App() {
       ],
     )
   }
-  
+
+  function selectFinding(finding: BugFinding) {
+    setSelectedFinding(finding)
+    goToFinding(finding.line)
+  }
+
 
   function selectFile(file: string) {
     setActiveFile(file)
     setIsPossessed(false)
+    setBugReport(null)
+    setSelectedFinding(null)
 
     if (file === 'main.ts') {
       setCode(initialCode)
@@ -278,14 +300,13 @@ function App() {
 
         <div className="topbar-center">
           <span className="workspace-dot" />
-          <span>the-cursed-project</span>
-          <ChevronDown size={14} />
+          <span>Sample workspace</span>
         </div>
 
         <div className="topbar-actions">
-          <div className="connection-status">
-            <span className="status-dot" />
-            <span>GHOST AWAKE</span>
+          <div className={`connection-status connection-${connectionStatus}`}>
+            <span className={`status-dot connection-${connectionStatus}`} />
+            <span>{connectionStatus === 'model-not-found' ? 'MODEL NOT FOUND' : connectionStatus.toUpperCase()}</span>
           </div>
           <button className="icon-button" title="Settings">
             <Settings size={17} />
@@ -344,7 +365,7 @@ function App() {
 
             <button className="project-heading">
               <ChevronDown size={14} />
-              <span>THE-CURSED-PROJECT</span>
+              <span>PHANTOM SAMPLE</span>
             </button>
 
             <div className="file-tree">
@@ -385,7 +406,7 @@ function App() {
             <div className="explorer-bottom">
               <div className="explorer-note">
                 <Ghost size={17} />
-                <span>4 files in this realm</span>
+                <span>Sample files · in-memory only</span>
               </div>
               <div className="explorer-note muted">
                 <Activity size={15} />
@@ -400,12 +421,12 @@ function App() {
             <div className="editor-tab">
               <FileCode2 size={15} className="ts-icon" />
               <span>{activeFile}</span>
-              <span className="unsaved-dot" title="Demo editor state" />
+                <span className="unsaved-dot" title="In-memory sample editor" />
             </div>
             <div className="editor-actions">
               <button
                 className="mini-icon-button"
-                title="Reset demo code"
+                title="Reset sample code"
                 onClick={() => {
                   setCode(initialCode)
                   setActiveFile('main.ts')
@@ -428,7 +449,7 @@ function App() {
             <ChevronRight size={13} />
             <span>{activeFile}</span>
             <ChevronRight size={13} />
-            <span className="breadcrumb-muted">The unknown</span>
+              <span className="breadcrumb-muted">Sample editor · changes are in memory</span>
           </div>
 
           <div className="code-editor">
@@ -475,7 +496,7 @@ function App() {
               >
                 <Bug size={14} />
                 PROBLEMS
-                <span className="count-badge">1</span>
+                {bugReport && <span className="count-badge">{bugReport.findings.length}</span>}
               </button>
               <button
                 className={bottomPanel === 'terminal' ? 'panel-tab active' : 'panel-tab'}
@@ -511,10 +532,10 @@ function App() {
                       <button
                         className="problem-row problem-row-clickable"
                         key={`${finding.title}-${index}`}
-                        onClick={() => goToFinding(finding.line)}
+                        onClick={() => selectFinding(finding)}
                         title={finding.explanation}
                         type="button"
-                       >                        
+                       >
                        <ShieldAlert
                           size={15}
                           className={`severity-${finding.severity}`}
@@ -528,6 +549,19 @@ function App() {
                         </span>
                       </button>
                     ))
+                  )}
+                  {selectedFinding && (
+                    <section className="finding-details" aria-live="polite">
+                      <div className="finding-detail-heading">
+                        <ShieldAlert size={14} className={`severity-${selectedFinding.severity}`} />
+                        <strong>{selectedFinding.title}</strong>
+                        <span className={`problem-source severity-${selectedFinding.severity}`}>
+                          {selectedFinding.severity.toUpperCase()}
+                        </span>
+                      </div>
+                      <p>{selectedFinding.explanation}</p>
+                      <div><strong>Suggested fix</strong><p>{selectedFinding.fix}</p></div>
+                    </section>
                   )}
                 </div>
               )}
@@ -564,20 +598,14 @@ function App() {
           <div className="mode-switch">
             <button
               className={mode === 'instant' ? 'mode-option active' : 'mode-option'}
-              onClick={() => {
-                setMode('instant')
-                summonGhost('welcome')
-              }}
+              onClick={() => setMode('instant')}
             >
               <Zap size={14} />
               Instant
             </button>
             <button
               className={mode === 'silent' ? 'mode-option active' : 'mode-option'}
-              onClick={() => {
-                setMode('silent')
-                summonGhost('welcome')
-              }}
+              onClick={() => setMode('silent')}
             >
               <Eye size={14} />
               Observer
@@ -598,8 +626,8 @@ function App() {
               {isPossessed ? 'RESTLESS SPIRIT' : 'PHANTOM'}
             </div>
             <div className="ghost-status">
-              <span className="status-dot" />
-              {isThinking ? 'Consulting the beyond...' : 'Present in this realm'}
+              <span className={`status-dot connection-${connectionStatus}`} />
+              {isThinking ? 'Consulting the beyond...' : mode === 'silent' ? 'Quiet until summoned' : 'Ready when summoned'}
             </div>
           </div>
 
@@ -624,7 +652,7 @@ function App() {
                   <span>{isPossessed ? 'DISTURBANCE DETECTED' : 'THE GHOST SPEAKS'}</span>
                 </div>
                 <p>{ghostReply}</p>
-                <span className="response-time">JUST NOW · LOCAL AI</span>
+                <span className="response-time">LOCAL AI · OLLAMA</span>
               </>
             )}
           </div>
@@ -685,8 +713,8 @@ function App() {
         <div className="status-right">
           <span>TypeScript</span>
           <span>UTF-8</span>
-          <span>LOCAL WORKSPACE</span>
-          <span className="status-health"><span className="status-dot" /> READY</span>
+          <span>IN-MEMORY SAMPLE</span>
+          <span className={`status-health connection-${connectionStatus}`}>{connectionStatus === 'model-not-found' ? 'MODEL NOT FOUND' : connectionStatus.toUpperCase()}</span>
         </div>
       </footer>
     </main>

@@ -2,6 +2,7 @@
 
 interface Window {
   phantom: {
+    checkHealth: () => Promise<{ status: 'connected' | 'offline' | 'model-not-found' }>
     askGhost: (payload: {
       question: string
       code: string

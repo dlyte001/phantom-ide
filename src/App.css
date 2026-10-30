@@ -118,6 +118,33 @@
   letter-spacing: .9px;
 }
 
+.connection-status.connection-connecting,
+.status-health.connection-connecting {
+  color: #c9b7f2;
+}
+
+.connection-status.connection-connected .status-dot,
+.ghost-status .connection-connected {
+  background: var(--green);
+  color: var(--green);
+}
+
+.connection-status.connection-offline .status-dot,
+.status-health.connection-offline,
+.ghost-status .connection-offline {
+  background: var(--red);
+  color: var(--red);
+  box-shadow: 0 0 9px #ff819760;
+}
+
+.connection-status.connection-model-not-found .status-dot,
+.status-health.connection-model-not-found,
+.ghost-status .connection-model-not-found {
+  background: #f2b86d;
+  color: #f2b86d;
+  box-shadow: 0 0 9px #f2b86d60;
+}
+
 .icon-button,
 .mini-icon-button {
   display: grid;
@@ -868,6 +895,46 @@
 
 .status-health {
   color: var(--green);
+}
+
+.finding-details {
+  margin: 8px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid #41364c;
+  border-left: 2px solid var(--purple-dim);
+  border-radius: 5px;
+  background: #15121e;
+  color: #c1b8cf;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.finding-detail-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.finding-detail-heading strong {
+  flex: 1;
+  min-width: 0;
+  color: #e9e5f1;
+}
+
+.finding-details p {
+  margin: 7px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.finding-details > div:last-child {
+  margin-top: 9px;
+  color: #c8b7ea;
+}
+
+.panel-content {
+  max-height: 120px;
+  overflow-y: auto;
 }
 
 .status-health .status-dot {
