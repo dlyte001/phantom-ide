@@ -88,8 +88,15 @@ ipcMain.handle(
               'For bug investigations, return ONLY valid JSON with this shape: ' +
               '{"summary":"brief summary","findings":[{"title":"short bug title",' +
               '"severity":"error|warning|info","line":1,"explanation":"why it matters",' +
-              '"fix":"suggested correction"}]}. ' +
-              'Use 1-based line numbers from the supplied code. ' +
+              '"fix":"suggested correction","code_reference":"exact offending expression ' +
+              'copied from supplied code","code_context":"optional larger exact snippet ' +
+              'copied from supplied code to disambiguate repeated expressions"}]}. ' +
+              'For each finding, include code_reference as an exact, non-empty source snippet ' +
+              'copied character-for-character from the supplied editor code. Keep it short ' +
+              'and distinctive. If that snippet occurs more than once, include code_context ' +
+              'as a larger exact snippet copied from the same code that contains the reference ' +
+              'once and distinguishes the occurrence. The line field is advisory; the editor ' +
+              'will resolve the location from code_reference. ' +
               'If there are no likely bugs, return {"summary":"No likely bugs found",' +
               '"findings":[]}. Do not wrap JSON in Markdown fences. ' +
               'For other requests, answer in concise plain text.',
@@ -139,8 +146,13 @@ ipcMain.handle(
 )
 
 function createWindow() {
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.png')
+    : path.join(process.env.APP_ROOT!, 'resources', 'icon.png')
+
   win = new BrowserWindow({
-    icon: path.join(process.env.VITE_PUBLIC!, 'electron-vite.svg'),
+    title: 'PHANTOM IDE',
+    icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
       contextIsolation: true,

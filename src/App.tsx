@@ -33,7 +33,11 @@ type GhostMode = 'instant' | 'silent'
 type BugFinding = {
   title: string
   severity: 'error' | 'warning' | 'info'
-  line: number
+  line: number | null
+  advisoryLine: number
+  codeReference: string
+  codeContext?: string
+  locationResolved: boolean
   explanation: string
   fix: string
 }
@@ -41,6 +45,8 @@ type BugFinding = {
 type BugReport = {
   summary: string
   findings: BugFinding[]
+  sourceCode: string
+  modelVersionId: number
 }
 
 type ConnectionStatus = 'connecting' | 'connected' | 'offline' | 'model-not-found'
@@ -114,7 +120,7 @@ function formatGhostResponse(text: string) {
   return <div className="formatted-response">{blocks}</div>
 }
 
-function parseBugReport(answer: string, lineCount: number): BugReport {
+function parseBugReport(answer: string): Omit<BugReport, 'sourceCode' | 'modelVersionId'> {
   const cleanedAnswer = answer.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
   const report: unknown = JSON.parse(cleanedAnswer)
   if (!report || typeof report !== 'object') throw new Error('Expected a JSON object.')
@@ -130,20 +136,57 @@ function parseBugReport(answer: string, lineCount: number): BugReport {
     if (
       typeof finding.title !== 'string' || !finding.title.trim() ||
       !['error', 'warning', 'info'].includes(String(finding.severity)) ||
-      !Number.isInteger(finding.line) || Number(finding.line) < 1 || Number(finding.line) > lineCount ||
+      !Number.isInteger(finding.line) || Number(finding.line) < 1 ||
+      typeof finding.code_reference !== 'string' || !finding.code_reference.trim() ||
+      (finding.code_context !== undefined && typeof finding.code_context !== 'string') ||
       typeof finding.explanation !== 'string' || typeof finding.fix !== 'string'
     ) throw new Error('A finding contains missing or invalid fields.')
 
     return {
       title: finding.title.trim(),
       severity: finding.severity as BugFinding['severity'],
-      line: finding.line as number,
+      line: null,
+      advisoryLine: finding.line as number,
+      codeReference: finding.code_reference,
+      codeContext: finding.code_context as string | undefined,
+      locationResolved: false,
       explanation: finding.explanation,
       fix: finding.fix,
     }
   })
 
   return { summary: candidate.summary, findings }
+}
+
+function resolveFindingLocation(finding: BugFinding, model: editor.ITextModel): BugFinding {
+  const source = model.getValue()
+  const findOffsets = (text: string) => {
+    const offsets: number[] = []
+    let offset = 0
+    while ((offset = source.indexOf(text, offset)) !== -1) {
+      offsets.push(offset)
+      offset += 1
+    }
+    return offsets
+  }
+
+  let matches = findOffsets(finding.codeReference)
+  if (matches.length > 1 && finding.codeContext?.includes(finding.codeReference)) {
+    const contextMatches = findOffsets(finding.codeContext)
+    if (contextMatches.length === 1) {
+      const referenceOffset = finding.codeContext.indexOf(finding.codeReference)
+      if (referenceOffset === finding.codeContext.lastIndexOf(finding.codeReference)) {
+        matches = [contextMatches[0] + referenceOffset]
+      }
+    }
+  }
+
+  if (matches.length !== 1) return finding
+  return {
+    ...finding,
+    line: model.getPositionAt(matches[0]).lineNumber,
+    locationResolved: true,
+  }
 }
 
 const initialCode = `// Welcome to PHANTOM IDE
@@ -205,6 +248,7 @@ function App() {
     if (isThinking) return
     const requestRevision = codeRevisionRef.current
     const analyzedCode = code
+    const requestModelVersionId = editorRef.current?.getModel()?.getVersionId()
     setIsThinking(true)
     setIsInvestigating(action === 'bugs')
     setGhostError(false)
@@ -219,9 +263,12 @@ function App() {
     const prompts: Record<string, string> = {
       explain: 'Explain this code clearly, including what it does and any important edge cases.',
       bugs: 'Investigate this code for bugs, runtime errors, and edge cases. ' +
-        'For each finding, report the 1-based line number of the exact ' +
-        'expression that causes or demonstrates the issue. Count lines ' +
-        'from the first line of the supplied code. Suggest a practical fix.',
+        'For each finding, include code_reference as a short, exact snippet copied ' +
+        'character-for-character from the offending source expression. If it occurs ' +
+        'multiple times, include code_context as a larger exact snippet copied from ' +
+        'the editor code that contains the reference once and distinguishes it. The ' +
+        'line field is advisory; the editor resolves the location from the reference. ' +
+        'Suggest a practical fix.',
       refactor: 'Review this code and suggest practical improvements to readability, reliability, and maintainability.',
       test: 'Suggest useful test cases for this code, including edge cases. Provide example tests where appropriate.',
     }
@@ -231,9 +278,9 @@ function App() {
         question:
           action === 'bugs'
             ? `${prompts.bugs}
-            Check for actual runtime behavior and edge cases in the supplied code.
+            Check for actual runtime behavior and edge cases in the supplied code. Copy each code_reference and any code_context exactly from the editor code; do not invent or normalize whitespace in either snippet. Use a larger context snippet when the reference occurs more than once. The line value is advisory only.
             In JavaScript and TypeScript, division by zero normally produces Infinity or NaN rather than throwing an exception. Identify this if the code contains it.
-            Return only JSON with a summary and findings array. Each finding must have title, severity, line, explanation, and fix. Use 1-based line numbers. If no likely bugs exist, return an empty findings array.`
+            Return only JSON with a summary and findings array. Each finding must have title, severity, line, explanation, fix, and code_reference; code_context is optional and is used only to disambiguate repeated references. If no likely bugs exist, return an empty findings array.`
           : `${prompts[action] ?? prompts.explain}\n\nUse short, clear sections and fenced code blocks for code examples.`,
         code: analyzedCode,
         language: activeFile.endsWith('.tsx')
@@ -253,7 +300,21 @@ function App() {
 
       if (action === 'bugs') {
         try {
-          const report = parseBugReport(answer, Math.max(1, analyzedCode.split('\n').length))
+          const parsedReport = parseBugReport(answer)
+          const model = editorRef.current?.getModel()
+          if (!model || model.getValue() !== analyzedCode || model.getVersionId() !== requestModelVersionId) {
+            setBugReport(null)
+            setSelectedFinding(null)
+            setGhostReply('The editor changed while the Ghost was investigating. Summon it again to analyze the current code.')
+            setGhostHasResponded(false)
+            return
+          }
+          const report: BugReport = {
+            ...parsedReport,
+            sourceCode: analyzedCode,
+            modelVersionId: model.getVersionId(),
+            findings: parsedReport.findings.map((finding) => resolveFindingLocation(finding, model)),
+          }
 
           setBugReport(report)
           setSelectedFinding(null)
@@ -341,12 +402,21 @@ function App() {
     }
   }
 
-  function goToFinding(line: number) {
+  function goToFinding(finding: BugFinding) {
     const editorInstance = editorRef.current
-    if (!editorInstance) return
+    const model = editorInstance?.getModel()
+    if (!editorInstance || !model || !bugReport) return
 
-    const lineCount = editorInstance.getModel()?.getLineCount() ?? 1
-    const targetLine = Math.max(1, Math.min(line, lineCount))
+    if (
+      model.getVersionId() !== bugReport.modelVersionId ||
+      model.getValue() !== bugReport.sourceCode
+    ) {
+      clearInvestigation()
+      return
+    }
+    if (!finding.locationResolved || finding.line === null) return
+
+    const targetLine = finding.line
 
     editorInstance.revealLineInCenter(targetLine)
     editorInstance.setPosition({ lineNumber: targetLine, column: 1 })
@@ -374,7 +444,7 @@ function App() {
 
   function selectFinding(finding: BugFinding) {
     setSelectedFinding(finding)
-    goToFinding(finding.line)
+    goToFinding(finding)
   }
 
   function clearInvestigation() {
@@ -420,10 +490,10 @@ function App() {
             <Ghost size={23} />
           </div>
           <div className="brand-name">
-            <span>PHANTOM</span>
+            <span>PHANTOM IDE</span>
             <span className="brand-subtitle">DEVELOPMENT ENVIRONMENT</span>
           </div>
-          <span className="version-tag">PRE-ALPHA</span>
+          <span className="version-tag">MVP</span>
         </div>
 
         <div className="topbar-center">
@@ -587,6 +657,37 @@ function App() {
 
           <div className="code-editor">
             <Editor
+              beforeMount={(monaco) => {
+                monaco.editor.defineTheme('phantom-dark', {
+                  base: 'vs-dark',
+                  inherit: true,
+                  rules: [
+                    { token: 'comment', foreground: '776D87' },
+                    { token: 'keyword', foreground: 'C4A7FF' },
+                    { token: 'string', foreground: 'A9D6B4' },
+                    { token: 'number', foreground: 'E7B77C' },
+                    { token: 'type.identifier', foreground: '8FC8E8' },
+                  ],
+                  colors: {
+                    'editor.background': '#0E0C14',
+                    'editor.foreground': '#DDD7E8',
+                    'editorLineNumber.foreground': '#5E566B',
+                    'editorLineNumber.activeForeground': '#C7B2F3',
+                    'editorGutter.background': '#0E0C14',
+                    'editor.lineHighlightBackground': '#B49AFF0A',
+                    'editor.lineHighlightBorder': '#00000000',
+                    'editor.selectionBackground': '#7656A64D',
+                    'editor.inactiveSelectionBackground': '#7656A633',
+                    'editor.selectionHighlightBackground': '#B49AFF24',
+                    'editorCursor.foreground': '#CBB4FF',
+                    'editorIndentGuide.background1': '#292431',
+                    'editorIndentGuide.activeBackground1': '#55466B',
+                    'scrollbarSlider.background': '#72678055',
+                    'scrollbarSlider.hoverBackground': '#9B88B875',
+                    'scrollbarSlider.activeBackground': '#B49AFF88',
+                  },
+                })
+              }}
               onMount={(editorInstance) => {
                editorRef.current = editorInstance
               }}
@@ -598,7 +699,7 @@ function App() {
                     ? 'json'
                     : 'typescript'
               }
-              theme="vs-dark"
+              theme="phantom-dark"
               value={code}
               onChange={(value) => {
                 const nextCode = value ?? ''
@@ -622,8 +723,11 @@ function App() {
                 wordWrap: 'on',
                 renderLineHighlight: 'all',
                 scrollbar: {
-                  verticalScrollbarSize: 7,
-                  horizontalScrollbarSize: 7,
+                  verticalScrollbarSize: 8,
+                  horizontalScrollbarSize: 8,
+                  useShadows: false,
+                  verticalHasArrows: false,
+                  horizontalHasArrows: false,
                 },
               }}
             />
@@ -691,7 +795,9 @@ function App() {
                         />
                         <span title={finding.explanation}>{finding.title}</span>
                         <span className="problem-location">
-                          {activeFile}:{finding.line}
+                          {finding.locationResolved && finding.line !== null
+                            ? `${activeFile}:${finding.line}`
+                            : `${activeFile}: location unresolved`}
                         </span>
                         <span className={`problem-source severity-${finding.severity}`}>
                           {finding.severity.toUpperCase()}
@@ -704,7 +810,11 @@ function App() {
                       <div className="finding-detail-heading">
                         <ShieldAlert size={14} className={`severity-${selectedFinding.severity}`} />
                         <strong>{selectedFinding.title}</strong>
-                        <span className="finding-line">LINE {selectedFinding.line}</span>
+                        <span className="finding-line">
+                          {selectedFinding.locationResolved && selectedFinding.line !== null
+                            ? `LINE ${selectedFinding.line}`
+                            : 'LOCATION UNRESOLVED'}
+                        </span>
                         <span className={`problem-source severity-${selectedFinding.severity}`}>
                           {selectedFinding.severity.toUpperCase()}
                         </span>
@@ -870,7 +980,7 @@ function App() {
 
       <footer className="statusbar">
         <div className="status-left">
-          <span><Ghost size={13} /> PHANTOM</span>
+          <span><Ghost size={13} /> PHANTOM IDE</span>
           <span><Activity size={13} /> {mode === 'instant' ? 'INSTANT HAUNTING' : 'SILENT OBSERVER'}</span>
         </div>
         <div className="status-right">

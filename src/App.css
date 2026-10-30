@@ -1328,3 +1328,215 @@
   width: 4px !important;
   margin-left: 3px;
 }
+
+/* Quiet, shared scrollbars for the editor shell and its scrollable panels. */
+.phantom-app,
+.phantom-app * {
+  scrollbar-color: #62586f #15121b;
+  scrollbar-width: thin;
+}
+
+.phantom-app *::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.phantom-app *::-webkit-scrollbar-track {
+  background: #15121b;
+}
+
+.phantom-app *::-webkit-scrollbar-thumb {
+  border: 2px solid #15121b;
+  border-radius: 8px;
+  background: #62586f;
+}
+
+.phantom-app *::-webkit-scrollbar-thumb:hover {
+  background: #88799d;
+}
+
+.monaco-editor .scrollbar > .slider {
+  border-radius: 6px;
+}
+
+.problems-content {
+  gap: 8px;
+}
+
+.problem-row-clickable {
+  min-height: 37px;
+  padding: 8px 11px;
+  border-color: transparent;
+  border-radius: 6px;
+  background: #15121b;
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.problem-row-clickable:hover {
+  border-color: #40334f;
+  background: #1b1624;
+}
+
+.problem-row-clickable.selected {
+  border-color: #49395c;
+  background: #211a2d;
+}
+
+.problem-row-clickable.severity-border-error,
+.problem-row-clickable.severity-border-warning,
+.problem-row-clickable.severity-border-info {
+  border-left-width: 2px;
+}
+
+.severity-error { color: #ff91a5 !important; }
+.severity-warning { color: #f2bf7d !important; }
+.severity-info { color: #83c8f2 !important; }
+
+.problem-source.severity-error { color: #ff9bad; border-color: #79384c; background: #ff81970b; }
+.problem-source.severity-warning { color: #f2c17f; border-color: #695234; background: #f2b86d0b; }
+.problem-source.severity-info { color: #8cccf0; border-color: #36556b; background: #79c6ff0b; }
+
+.clear-investigation {
+  min-height: 27px;
+  padding: 5px 9px;
+  border-color: #342b40;
+  color: #bdb2cb;
+  background: #17141e;
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.clear-investigation:hover {
+  border-color: #8064a8;
+  color: #e7d8ff;
+  background: #211a2d;
+}
+
+.finding-details {
+  margin-top: 3px;
+  padding: 13px 14px;
+  border-color: #342b40;
+  border-radius: 7px;
+  background: #14111b;
+  line-height: 1.65;
+}
+
+.finding-detail-heading {
+  flex-wrap: wrap;
+  row-gap: 7px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid #292331;
+}
+
+.finding-section {
+  margin-top: 12px;
+}
+
+.finding-section p {
+  margin-top: 5px;
+  color: #d0c8da;
+  line-height: 1.7;
+}
+
+.finding-section.suggested-fix {
+  padding: 10px 11px;
+  border-color: #30273b;
+  border-radius: 6px;
+  background: #100e16;
+}
+
+.ghost-presence {
+  padding-top: 15px;
+  padding-bottom: 16px;
+}
+
+.ghost-orbit {
+  margin-bottom: 7px;
+}
+
+.ghost-divider {
+  margin: 2px 0 4px;
+}
+
+.quick-actions {
+  padding-right: 13px;
+  padding-left: 13px;
+}
+
+.quick-actions-title {
+  margin-bottom: 9px;
+}
+
+.quick-actions button {
+  min-height: 35px;
+  border-color: transparent;
+  border-radius: 6px;
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease, transform 100ms ease;
+}
+
+.quick-actions button:hover:not(:disabled) {
+  border-color: #443455;
+  background: #211a2d;
+}
+
+.quick-actions button:active:not(:disabled) {
+  transform: translateY(1px);
+  background: #2a2038;
+}
+
+.quick-actions button:focus-visible,
+.mode-option:focus-visible,
+.clear-investigation:focus-visible {
+  outline: 2px solid #a98aff;
+  outline-offset: 1px;
+}
+
+.quick-actions button:disabled {
+  border-color: transparent;
+  color: #857b91;
+  background: #18151e;
+  cursor: progress;
+  opacity: .72;
+}
+
+.quick-actions button:disabled > svg:first-child {
+  color: #796b91;
+}
+
+.mode-option {
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.mode-option:hover:not(.active) {
+  color: #d3c6e6;
+  background: #ffffff08;
+}
+
+.ghost-input-area {
+  border-color: #332a40;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.ghost-input-area:focus-within {
+  border-color: #8064a8;
+  box-shadow: 0 0 0 2px #b49aff12;
+}
+
+.ghost-input-area button {
+  transition: background 150ms ease, color 150ms ease, transform 100ms ease;
+}
+
+.ghost-input-area button:hover:not(:disabled) {
+  color: #fff;
+  background: #9c78dc55;
+}
+
+.ghost-input-area button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+@media (max-height: 800px) {
+  .ghost-presence {
+    padding-top: 4px;
+    padding-bottom: 6px;
+  }
+}
