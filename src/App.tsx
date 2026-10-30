@@ -24,6 +24,7 @@ import {
   Zap,
   PanelLeft,
   RotateCcw,
+  X,
 } from 'lucide-react'
 import './App.css'
 
@@ -43,6 +44,75 @@ type BugReport = {
 }
 
 type ConnectionStatus = 'connecting' | 'connected' | 'offline' | 'model-not-found'
+type ChatTurn = { role: 'user' | 'assistant'; content: string }
+
+function renderInline(text: string) {
+  return text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((part, index) => {
+    if (part.startsWith('`') && part.endsWith('`')) {
+      return <code className="inline-code" key={index}>{part.slice(1, -1)}</code>
+    }
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>
+    }
+    return part
+  })
+}
+
+function formatGhostResponse(text: string) {
+  const lines = text.split('\n')
+  const blocks: React.ReactNode[] = []
+  let paragraph: string[] = []
+  let list: string[] = []
+  let inCodeBlock = false
+  let codeLines: string[] = []
+
+  const flushParagraph = () => {
+    if (paragraph.length) blocks.push(<p key={`p-${blocks.length}`}>{renderInline(paragraph.join(' '))}</p>)
+    paragraph = []
+  }
+  const flushList = () => {
+    if (list.length) blocks.push(<ul key={`ul-${blocks.length}`}>{list.map((item, i) => <li key={i}>{renderInline(item)}</li>)}</ul>)
+    list = []
+  }
+
+  lines.forEach((line) => {
+    if (/^```/.test(line.trim())) {
+      flushParagraph()
+      flushList()
+      if (inCodeBlock) {
+        blocks.push(<pre key={`code-${blocks.length}`}><code>{codeLines.join('\n')}</code></pre>)
+        inCodeBlock = false
+      } else {
+        codeLines = []
+        inCodeBlock = true
+      }
+      return
+    }
+    if (inCodeBlock) {
+      codeLines.push(line)
+      return
+    }
+    const item = line.match(/^\s*(?:[-*+]\s+|\d+[.)]\s+)(.+)$/)
+    if (item) {
+      flushParagraph()
+      list.push(item[1])
+    } else if (!line.trim()) {
+      flushParagraph()
+      flushList()
+    } else if (/^#{1,4}\s+/.test(line)) {
+      flushParagraph()
+      flushList()
+      blocks.push(<h4 key={`h-${blocks.length}`}>{renderInline(line.replace(/^#{1,4}\s+/, ''))}</h4>)
+    } else {
+      flushList()
+      paragraph.push(line.trim())
+    }
+  })
+  flushParagraph()
+  flushList()
+  if (inCodeBlock) blocks.push(<pre key={`code-${blocks.length}`}><code>{codeLines.join('\n')}</code></pre>)
+  return <div className="formatted-response">{blocks}</div>
+}
 
 function parseBugReport(answer: string, lineCount: number): BugReport {
   const cleanedAnswer = answer.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
@@ -91,6 +161,8 @@ console.log("The result is:", result)
 
 function App() {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
+  const decorationIdsRef = useRef<string[]>([])
+  const codeRevisionRef = useRef(0)
   const [mode, setMode] = useState<GhostMode>('instant')
   const [code, setCode] = useState(initialCode)
   const [bugReport, setBugReport] = useState<BugReport | null>(null)
@@ -100,10 +172,14 @@ function App() {
   const [ghostReply, setGhostReply] = useState('The Ghost is quiet until summoned. Choose an action to analyze the current editor sample.')
   const [isPossessed, setIsPossessed] = useState(false)
   const [isThinking, setIsThinking] = useState(false)
+  const [isInvestigating, setIsInvestigating] = useState(false)
   const [bottomPanel, setBottomPanel] = useState('problems')
   const [showExplorer, setShowExplorer] = useState(true)
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting')
   const [selectedFinding, setSelectedFinding] = useState<BugFinding | null>(null)
+  const [ghostError, setGhostError] = useState(false)
+  const [ghostHasResponded, setGhostHasResponded] = useState(false)
+  const [chatHistory, setChatHistory] = useState<ChatTurn[]>([])
 
   useEffect(() => {
     let mounted = true
@@ -126,7 +202,13 @@ function App() {
 
 
   async function summonGhost(action: 'explain' | 'bugs' | 'refactor' | 'test') {
+    if (isThinking) return
+    const requestRevision = codeRevisionRef.current
+    const analyzedCode = code
     setIsThinking(true)
+    setIsInvestigating(action === 'bugs')
+    setGhostError(false)
+    setGhostHasResponded(false)
     if (action === 'bugs') {
       setBugReport(null)
       setSelectedFinding(null)
@@ -152,8 +234,8 @@ function App() {
             Check for actual runtime behavior and edge cases in the supplied code.
             In JavaScript and TypeScript, division by zero normally produces Infinity or NaN rather than throwing an exception. Identify this if the code contains it.
             Return only JSON with a summary and findings array. Each finding must have title, severity, line, explanation, and fix. Use 1-based line numbers. If no likely bugs exist, return an empty findings array.`
-        : prompts[action] ?? prompts.explain,
-        code,
+          : `${prompts[action] ?? prompts.explain}\n\nUse short, clear sections and fenced code blocks for code examples.`,
+        code: analyzedCode,
         language: activeFile.endsWith('.tsx')
           ? 'TypeScript React (TSX)'
           : activeFile.endsWith('.json')
@@ -161,13 +243,23 @@ function App() {
             : 'TypeScript',
       })
 
+      if (action === 'bugs' && requestRevision !== codeRevisionRef.current) {
+        setBugReport(null)
+        setSelectedFinding(null)
+        setGhostReply('The sample changed while the Ghost was investigating. Summon it again to analyze the current code.')
+        setGhostHasResponded(false)
+        return
+      }
+
       if (action === 'bugs') {
         try {
-          const report = parseBugReport(answer, Math.max(1, code.split('\n').length))
+          const report = parseBugReport(answer, Math.max(1, analyzedCode.split('\n').length))
 
           setBugReport(report)
           setSelectedFinding(null)
           setGhostReply(report.summary || 'Investigation complete.')
+          setGhostHasResponded(true)
+          setChatHistory([{ role: 'assistant', content: report.summary }])
 
           if (report.findings.length > 0) {
             setBottomPanel('problems')
@@ -175,9 +267,15 @@ function App() {
         } catch {
           setBugReport(null)
           setGhostReply('The Ghost returned a malformed bug report. Try investigating again; findings must include valid fields and a line within the current editor code.')
+          setGhostError(true)
         }
       } else {
         setGhostReply(answer)
+        setGhostHasResponded(true)
+        setChatHistory([
+          { role: 'user', content: prompts[action] ?? prompts.explain },
+          { role: 'assistant', content: answer },
+        ])
       }
 
       setIsPossessed(action === 'bugs')
@@ -189,9 +287,11 @@ function App() {
           error instanceof Error ? error.message : 'An unexpected error occurred.'
         }\n\nCheck that Ollama is running and qwen2.5-coder:1.5b is installed.`
       )
+      setGhostError(true)
       setIsPossessed(false)
     } finally {
       setIsThinking(false)
+      setIsInvestigating(false)
     }
   }
 
@@ -200,14 +300,24 @@ function App() {
     if (!message.trim() || isThinking) return
 
     const question = message.trim()
+    const recentContext = chatHistory.slice(-6)
+      .map((turn) => `${turn.role === 'user' ? 'Developer' : 'Ghost'}: ${turn.content}`)
+      .join('\n\n')
+      .slice(-2600)
+    const contextualQuestion = chatHistory.length
+      ? `Conversation so far:\n${recentContext}\n\nDeveloper follow-up: ${question}`.slice(-3900)
+      : question
     setMessage('')
     setIsThinking(true)
+    setGhostError(false)
+    setGhostHasResponded(false)
     setIsPossessed(false)
+    setIsInvestigating(false)
     setActiveTab('ghost')
 
     try {
       const answer = await window.phantom.askGhost({
-        question,
+        question: `${contextualQuestion}\n\nUse concise headings and lists where useful. Put code examples in fenced code blocks.`,
         code,
         language: activeFile.endsWith('.tsx')
           ? 'TypeScript React (TSX)'
@@ -217,12 +327,15 @@ function App() {
       })
 
       setGhostReply(answer)
+      setGhostHasResponded(true)
+      setChatHistory((history) => [...history, { role: 'user' as const, content: question }, { role: 'assistant' as const, content: answer }].slice(-12))
     } catch (error) {
       setGhostReply(
         `The local AI connection failed. ${
           error instanceof Error ? error.message : 'An unexpected error occurred.'
         }\n\nMake sure Ollama is running and the Qwen model is installed.`
       )
+      setGhostError(true)
     } finally {
       setIsThinking(false)
     }
@@ -239,8 +352,8 @@ function App() {
     editorInstance.setPosition({ lineNumber: targetLine, column: 1 })
     editorInstance.focus()
 
-    editorInstance.deltaDecorations(
-      [],
+    decorationIdsRef.current = editorInstance.deltaDecorations(
+      decorationIdsRef.current,
       [
         {
           range: {
@@ -264,12 +377,27 @@ function App() {
     goToFinding(finding.line)
   }
 
+  function clearInvestigation() {
+    setBugReport(null)
+    setSelectedFinding(null)
+    setIsPossessed(false)
+    setIsInvestigating(false)
+    setChatHistory([])
+    setGhostError(false)
+    setGhostHasResponded(false)
+    setGhostReply('The investigation is clear. The Ghost is ready when summoned.')
+    decorationIdsRef.current = editorRef.current?.deltaDecorations(decorationIdsRef.current, []) ?? []
+  }
+
 
   function selectFile(file: string) {
+    codeRevisionRef.current += 1
     setActiveFile(file)
     setIsPossessed(false)
     setBugReport(null)
     setSelectedFinding(null)
+    setChatHistory([])
+    decorationIdsRef.current = editorRef.current?.deltaDecorations(decorationIdsRef.current, []) ?? []
 
     if (file === 'main.ts') {
       setCode(initialCode)
@@ -308,7 +436,7 @@ function App() {
             <span className={`status-dot connection-${connectionStatus}`} />
             <span>{connectionStatus === 'model-not-found' ? 'MODEL NOT FOUND' : connectionStatus.toUpperCase()}</span>
           </div>
-          <button className="icon-button" title="Settings">
+          <button className="icon-button unavailable-control" title="Settings are not available in the sample build" disabled>
             <Settings size={17} />
           </button>
         </div>
@@ -325,15 +453,17 @@ function App() {
           </button>
           <button
             className={`activity-icon ${activeTab === 'search' ? 'selected' : ''}`}
-            title="Search"
-            onClick={() => setActiveTab('search')}
+            title="Search is not available in the sample build"
+            aria-label="Search unavailable"
+            disabled
           >
             <Search size={20} />
           </button>
           <button
-            className={`activity-icon ${activeTab === 'ghost' ? 'selected' : ''}`}
-            title="Ghost companion"
-            onClick={() => setActiveTab('ghost')}
+            className={`activity-icon unavailable-control ${activeTab === 'ghost' ? 'selected' : ''}`}
+            title="The Ghost panel is always visible"
+            aria-label="Ghost panel is always visible"
+            disabled
           >
             <Ghost size={21} />
           </button>
@@ -348,10 +478,10 @@ function App() {
             <Bug size={20} />
           </button>
           <div className="activity-spacer" />
-          <button className="activity-icon" title="Appearance">
+          <button className="activity-icon unavailable-control" title="Appearance settings are not available" disabled>
             <Moon size={19} />
           </button>
-          <button className="activity-icon" title="Help">
+          <button className="activity-icon unavailable-control" title="Help is not available in the sample build" disabled>
             <CircleHelp size={19} />
           </button>
         </aside>
@@ -363,10 +493,10 @@ function App() {
               <FolderOpen size={15} />
             </div>
 
-            <button className="project-heading">
+            <div className="project-heading" aria-label="Sample workspace">
               <ChevronDown size={14} />
               <span>PHANTOM SAMPLE</span>
-            </button>
+            </div>
 
             <div className="file-tree">
               <div className="tree-folder">
@@ -428,8 +558,10 @@ function App() {
                 className="mini-icon-button"
                 title="Reset sample code"
                 onClick={() => {
+                  codeRevisionRef.current += 1
                   setCode(initialCode)
                   setActiveFile('main.ts')
+                  clearInvestigation()
                 }}
               >
                 <RotateCcw size={14} />
@@ -437,6 +569,7 @@ function App() {
               <button
                 className="mini-icon-button"
                 title="Summon ghost"
+                disabled={isThinking}
                 onClick={() => summonGhost('bugs')}
               >
                 <Sparkles size={15} />
@@ -467,7 +600,15 @@ function App() {
               }
               theme="vs-dark"
               value={code}
-              onChange={(value) => setCode(value ?? '')}
+              onChange={(value) => {
+                const nextCode = value ?? ''
+                if (nextCode !== code) {
+                  codeRevisionRef.current += 1
+                  if (bugReport) clearInvestigation()
+                  else setChatHistory([])
+                }
+                setCode(nextCode)
+              }}
               options={{
                 fontSize: 13,
                 fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
@@ -500,6 +641,8 @@ function App() {
               </button>
               <button
                 className={bottomPanel === 'terminal' ? 'panel-tab active' : 'panel-tab'}
+                title="Terminal is unavailable in the sample build"
+                disabled
                 onClick={() => setBottomPanel('terminal')}
               >
                 <Terminal size={14} />
@@ -507,6 +650,8 @@ function App() {
               </button>
               <button
                 className={bottomPanel === 'ghostlog' ? 'panel-tab active' : 'panel-tab'}
+                title="Ghost history is unavailable in the sample build"
+                disabled
                 onClick={() => setBottomPanel('ghostlog')}
               >
                 <Activity size={14} />
@@ -516,23 +661,27 @@ function App() {
 
             <div className="panel-content">
               {bottomPanel === 'problems' && (
-                <div className="problems-list">
+                <div className="problems-content">
+                  {bugReport && <button className="clear-investigation" onClick={clearInvestigation}><X size={13} /> Clear investigation</button>}
                   {bugReport === null ? (
-                    <div className="terminal-placeholder">
-                      <Bug size={14} />
-                      <span>Summon the Ghost to investigate your code.</span>
+                    <div className={`problems-empty ${isInvestigating ? 'loading' : ''}`}>
+                      {isInvestigating ? <Sparkles size={16} /> : <Bug size={14} />}
+                      <strong>{isInvestigating ? 'Investigation in progress' : 'No investigation yet'}</strong>
+                      <span>{isInvestigating ? 'The Ghost is examining the current sample.' : 'Ask the Ghost to inspect this sample code.'}</span>
                     </div>
                   ) : bugReport.findings.length === 0 ? (
-                    <div className="terminal-placeholder">
+                    <div className="problems-empty no-findings">
                       <Check size={14} />
-                      <span>{bugReport.summary || 'No likely bugs found.'}</span>
+                      <strong>No findings reported</strong>
+                      <span>{bugReport.summary || 'The Ghost found no likely issues in this sample.'}</span>
                     </div>
                   ) : (
                     bugReport.findings.map((finding, index) => (
                       <button
-                        className="problem-row problem-row-clickable"
+                        className={`problem-row problem-row-clickable ${selectedFinding === finding ? 'selected' : ''} severity-border-${finding.severity}`}
                         key={`${finding.title}-${index}`}
                         onClick={() => selectFinding(finding)}
+                        aria-pressed={selectedFinding === finding}
                         title={finding.explanation}
                         type="button"
                        >
@@ -551,32 +700,39 @@ function App() {
                     ))
                   )}
                   {selectedFinding && (
-                    <section className="finding-details" aria-live="polite">
+                    <section className={`finding-details severity-border-${selectedFinding.severity}`} aria-live="polite">
                       <div className="finding-detail-heading">
                         <ShieldAlert size={14} className={`severity-${selectedFinding.severity}`} />
                         <strong>{selectedFinding.title}</strong>
+                        <span className="finding-line">LINE {selectedFinding.line}</span>
                         <span className={`problem-source severity-${selectedFinding.severity}`}>
                           {selectedFinding.severity.toUpperCase()}
                         </span>
                       </div>
-                      <p>{selectedFinding.explanation}</p>
-                      <div><strong>Suggested fix</strong><p>{selectedFinding.fix}</p></div>
+                      <div className="finding-section">
+                        <strong>Why it matters</strong>
+                        <p>{selectedFinding.explanation}</p>
+                      </div>
+                      <div className="finding-section suggested-fix">
+                        <strong>Suggested fix</strong>
+                        <p>{selectedFinding.fix}</p>
+                      </div>
                     </section>
                   )}
                 </div>
               )}
               {bottomPanel === 'terminal' && (
-                <div className="terminal-placeholder">
+                <div className="terminal-placeholder unavailable-panel">
                   <span className="terminal-prompt">❯</span>
                   <span>
-                    Terminal integration is not configured in this preview.
+                    Terminal is unavailable in this sample build.
                   </span>
                 </div>
               )}
               {bottomPanel === 'ghostlog' && (
-                <div className="terminal-placeholder">
+                <div className="terminal-placeholder unavailable-panel">
                   <Ghost size={14} />
-                  <span>The ghost is waiting for its first investigation.</span>
+                  <span>Ghost history is unavailable in this sample build.</span>
                 </div>
               )}
             </div>
@@ -588,9 +744,9 @@ function App() {
             <div className="ghost-panel-title">
               <Ghost size={17} />
               <span>THE GHOST</span>
-              <span className="online-indicator" />
+              <span className={`online-indicator connection-${connectionStatus}`} />
             </div>
-            <button className="mini-icon-button" title="Ghost settings">
+            <button className="mini-icon-button unavailable-control" title="Ghost settings are not available" disabled>
               <Settings size={15} />
             </button>
           </div>
@@ -601,19 +757,24 @@ function App() {
               onClick={() => setMode('instant')}
             >
               <Zap size={14} />
-              Instant
+              Instant Haunting
             </button>
             <button
               className={mode === 'silent' ? 'mode-option active' : 'mode-option'}
               onClick={() => setMode('silent')}
             >
               <Eye size={14} />
-              Observer
+              Silent Observer
             </button>
+          </div>
+          <div className="mode-description">
+            {mode === 'instant'
+              ? 'Instant Haunting · choose an action to ask the local Ghost.'
+              : 'Silent Observer · stays quiet until explicitly summoned.'}
           </div>
 
           <div className="ghost-presence">
-            <div className={`ghost-orbit ${isPossessed ? 'orbit-danger' : ''}`}>
+            <div className={`ghost-orbit ${isPossessed ? 'orbit-danger' : ''} ${isThinking ? 'ghost-thinking' : ''}`}>
               <div className="orbit-ring ring-one" />
               <div className="orbit-ring ring-two" />
               <div className="ghost-glow" />
@@ -637,7 +798,7 @@ function App() {
             <span />
           </div>
 
-          <div className="ghost-response">
+          <div className="ghost-response" aria-live="polite" aria-busy={isThinking}>
             {isThinking ? (
               <div className="thinking">
                 <span />
@@ -647,34 +808,36 @@ function App() {
               </div>
             ) : (
               <>
-                <div className="response-label">
+                <div className={`response-label ${ghostError ? 'response-error' : ''}`}>
                   <Sparkles size={13} />
-                  <span>{isPossessed ? 'DISTURBANCE DETECTED' : 'THE GHOST SPEAKS'}</span>
+                  <span>{ghostError ? 'THE GHOST COULD NOT ANSWER' : isPossessed ? 'DISTURBANCE DETECTED' : ghostHasResponded ? 'THE GHOST SPEAKS' : 'THE GHOST WAITS'}</span>
                 </div>
-                <p>{ghostReply}</p>
-                <span className="response-time">LOCAL AI · OLLAMA</span>
+                {formatGhostResponse(ghostReply)}
+                <span className="response-time">
+                  {ghostError ? 'RESPONSE ERROR · TRY AGAIN' : ghostHasResponded ? 'LOCAL AI · OLLAMA' : 'AWAITING SUMMONS'}
+                </span>
               </>
             )}
           </div>
 
           <div className="quick-actions">
             <div className="quick-actions-title">SUMMON THE GHOST</div>
-            <button onClick={() => summonGhost('explain')}>
+            <button disabled={isThinking} onClick={() => summonGhost('explain')}>
               <Sparkles size={15} />
               Explain this code
               <ChevronRight size={14} className="action-arrow" />
             </button>
-            <button onClick={() => summonGhost('bugs')}>
+            <button disabled={isThinking} onClick={() => summonGhost('bugs')}>
               <Bug size={15} />
               Investigate bugs
               <ChevronRight size={14} className="action-arrow" />
             </button>
-            <button onClick={() => summonGhost('refactor')}>
+            <button disabled={isThinking} onClick={() => summonGhost('refactor')}>
               <Code2 size={15} />
               Suggest improvements
               <ChevronRight size={14} className="action-arrow" />
             </button>
-            <button onClick={() => summonGhost('test')}>
+            <button disabled={isThinking} onClick={() => summonGhost('test')}>
               <Check size={15} />
               Suggest test cases
               <ChevronRight size={14} className="action-arrow" />
